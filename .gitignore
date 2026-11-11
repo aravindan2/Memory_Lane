@@ -24,3 +24,5 @@ dist/
 build/
 node_modules/
 coverage/
+fran face.jpg
+backend/*.zip
