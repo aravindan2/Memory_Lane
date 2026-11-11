@@ -5,6 +5,9 @@ from urllib.parse import unquote_plus
 
 import boto3
 
+from opensearch_writer import index_photo_document
+
+
 s3 = boto3.client("s3")
 rekognition = boto3.client("rekognition")
 
@@ -24,7 +27,11 @@ def lambda_handler(event, context):
         key = unquote_plus(record["s3"]["object"]["key"])
 
         # 2. Retrieve user-supplied custom labels.
-        response = s3.head_object(Bucket=bucket, Key=key)
+        response = s3.head_object(
+            Bucket=bucket,
+            Key=key
+        )
+
         raw_labels = response.get("Metadata", {}).get(
             "customlabels", ""
         )
@@ -35,7 +42,7 @@ def lambda_handler(event, context):
             if label.strip()
         ]
 
-        # 3. Detect labels with Rekognition.
+        # 3. Detect labels using Amazon Rekognition.
         result = rekognition.detect_labels(
             Image={
                 "S3Object": {
@@ -53,17 +60,18 @@ def lambda_handler(event, context):
         ]
 
         # 4. Combine custom and detected labels.
-        # Remove duplicate labels, ignoring capitalization.
+        # Remove duplicates (case-insensitive).
         labels = []
         seen = set()
 
         for label in custom_labels + detected_labels:
             normalized = label.casefold()
+
             if normalized not in seen:
                 seen.add(normalized)
                 labels.append(label)
 
-        # 5. Prepare the Elasticsearch document.
+        # 5. Build the OpenSearch document.
         document = {
             "objectKey": key,
             "bucket": bucket,
@@ -71,8 +79,22 @@ def lambda_handler(event, context):
             "labels": labels
         }
 
-        # Temporary: log it until Elasticsearch is ready.
-        logger.info("INDEX_DOCUMENT: %s", json.dumps(document))
+        # 6. Log the document for debugging.
+        logger.info(
+            "INDEX_DOCUMENT: %s",
+            json.dumps(document)
+        )
+
+        # 7. Store the document in OpenSearch.
+        # Raises an exception if indexing fails.
+        index_photo_document(document)
+
+        logger.info(
+            "Successfully indexed photo: %s/%s",
+            bucket,
+            key
+        )
+
         documents.append(document)
 
     return {
@@ -80,5 +102,3 @@ def lambda_handler(event, context):
         "processed": len(documents),
         "documents": documents
     }
-
-# Testing automatic GitHub CI/CD trigger
