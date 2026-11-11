@@ -1,0 +1,16 @@
+
+version: 0.2
+
+phases:
+  build:
+    commands:
+      - echo "Checking LF1 Python syntax..."
+      - python -m py_compile backend/index_photos/lambda_function.py
+      - echo "Packaging LF1..."
+      - zip -j /tmp/index_photos.zip backend/index_photos/lambda_function.py
+
+  post_build:
+    commands:
+      - echo "Deploying LF1 to AWS Lambda..."
+      - aws lambda update-function-code --function-name index-photos --zip-file fileb:///tmp/index_photos.zip --region us-east-1
+      - echo "LF1 deployment complete."
