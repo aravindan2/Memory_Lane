@@ -8,10 +8,27 @@ phases:
 
   build:
     commands:
+      # LF1 - Index Photos
       - echo "Checking LF1 Python syntax"
       - python -m py_compile backend/index_photos/lambda_function.py
+
       - echo "Packaging LF1"
       - zip -j /tmp/index_photos.zip backend/index_photos/lambda_function.py
+
       - echo "Deploying LF1"
       - aws lambda update-function-code --function-name index-photos --zip-file fileb:///tmp/index_photos.zip --region us-east-1
-      - echo "Backend deployment complete"
+
+      # LF2 - Search Photos
+      - echo "Checking LF2 Python syntax"
+      - python -m py_compile backend/search_photos/lambda_function.py
+
+      - echo "Packaging LF2"
+      - zip -j /tmp/search_photos.zip backend/search_photos/lambda_function.py
+
+      - echo "Deploying LF2"
+      - aws lambda update-function-code --function-name search_photos --zip-file fileb:///tmp/search_photos.zip --region us-east-1
+
+      - echo "Waiting for LF2 deployment"
+      - aws lambda wait function-updated --function-name search_photos --region us-east-1
+
+      - echo "Backend deployment complete - LF1 and LF2"
