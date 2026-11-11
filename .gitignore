@@ -1,0 +1,26 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# Secrets and configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.aws/
+
+# Editor and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Build outputs
+dist/
+build/
+node_modules/
+coverage/
