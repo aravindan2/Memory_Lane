@@ -105,3 +105,6 @@ param names (`q`, `labels`), and the multipart field names (`file`, `label`).
 - **Search:** query box + optional comma-separated label filter; Enter submits; Clear resets.
 - **Results:** responsive card grid with image, caption, label chips and id; loading, empty and error states.
 - **Upload:** file picker with thumbnail preview (multiple files allowed — they are PUT sequentially), a **label chip input** (type + Enter or *Add*, click `×` or Backspace to remove, at least one label required), success/error status line. Labels you've used before are offered as autocomplete suggestions.
+
+
+MEOW
