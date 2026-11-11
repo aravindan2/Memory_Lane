@@ -1,8 +1,12 @@
 /**
- * Thin API client for the photo backend.
+ * Thin API client for the Memory Lane backend (see docs/swagger.json).
  *
- * GET  /search   -> searchPhotos({ query, labels })
- * PUT  /photos   -> uploadPhoto(file, labels)
+ * GET  /search?q=<text>
+ *      -> searchPhotos({ query })
+ *
+ * PUT  /photos?filename=<name>          (raw image bytes in the body)
+ *      headers: x-api-key, x-amz-meta-customLabels, Content-Type
+ *      -> uploadPhoto(file, labels)
  *
  * The wire format is driven entirely by window.APP_CONFIG (js/config.js).
  */
@@ -23,8 +27,16 @@
     return config.apiBase + config.endpoints[name];
   }
 
+  /** Headers applied to every request (gateway API key, when configured). */
+  function withAuthHeaders(headers) {
+    var out = Object.assign({}, headers || {});
+    if (config.apiKey) out["x-api-key"] = config.apiKey;
+    return out;
+  }
+
   /**
-   * fetch() wrapper: adds timeout and turns non-2xx responses into ApiError.
+   * fetch() wrapper: adds timeout, API key and turns non-2xx responses into
+   * ApiError with a hint when the API key is missing.
    * @returns {Promise<Response>}
    */
   function request(url, options) {
@@ -34,6 +46,7 @@
     }, config.timeoutMs);
 
     var opts = Object.assign({ signal: controller.signal }, options || {});
+    opts.headers = withAuthHeaders(opts.headers);
 
     return fetch(url, opts)
       .then(function (res) {
@@ -43,10 +56,14 @@
             .catch(function () {})
             .then(function (body) {
               var detail = body ? " — " + body.slice(0, 300) : "";
-              throw new ApiError(
-                "Request failed (" + res.status + " " + res.statusText + ")" + detail,
-                res.status
-              );
+              var message =
+                "Request failed (" + res.status + " " + res.statusText + ")" + detail;
+              if ((res.status === 401 || res.status === 403) && !config.apiKey) {
+                message +=
+                  " · The API Gateway requires an x-api-key — open the page with" +
+                  " ?apiKey=YOUR_KEY or set it in js/config.js";
+              }
+              throw new ApiError(message, res.status);
             });
         }
         return res;
@@ -57,7 +74,7 @@
         }
         if (err instanceof ApiError) throw err;
         throw new ApiError(
-          "Network error — is the backend running at " + config.apiBase + "? (" + err.message + ")",
+          "Network error — is the backend reachable at " + config.apiBase + "? (" + err.message + ")",
           0
         );
       })
@@ -88,12 +105,18 @@
 
   /**
    * Normalize a search response into an array of photo records.
-   * Accepts: [...] | { results: [...] } | { photos: [...] } |
-   *          { items: [...] } | { data: [...] }
+   * Accepts: [...] | { results: [...] } | { photos: [...] } | { items: [...] } |
+   *          { data: [...] } | Elasticsearch-style { hits: { hits: [{ _source }] } }
    */
   function normalizeResults(payload) {
     if (Array.isArray(payload)) return payload;
     if (payload && typeof payload === "object") {
+      // Elasticsearch / OpenSearch search response
+      if (payload.hits && Array.isArray(payload.hits.hits)) {
+        return payload.hits.hits.map(function (hit) {
+          return hit._source || hit;
+        });
+      }
       var keys = ["results", "photos", "items", "data"];
       for (var i = 0; i < keys.length; i++) {
         if (Array.isArray(payload[keys[i]])) return payload[keys[i]];
@@ -111,8 +134,8 @@
   }
 
   /**
-   * GET /search?q=<query>&labels=<a,b>
-   * @param {{query?: string, labels?: string[]|string}} criteria
+   * GET /search?q=<text>
+   * @param {{query?: string}} criteria
    * @returns {Promise<Array<object>>} normalized photo records
    */
   function searchPhotos(criteria) {
@@ -127,23 +150,35 @@
   }
 
   /**
-   * PUT /photos  (multipart/form-data)
+   * PUT /photos?filename=<name>  — raw bytes, labels in a metadata header.
    * @param {File|Blob} file
    * @param {string[]} labels  one or more custom labels
    * @returns {Promise<object|null>} parsed JSON response, or null for empty bodies
    */
   function uploadPhoto(file, labels) {
-    var form = new FormData();
-    form.append(config.upload.fileField, file, file.name || "upload");
-    (labels || []).forEach(function (label) {
-      label = String(label).trim();
-      if (label) form.append(config.upload.labelsField, label);
-    });
+    var filename = file.name || "upload";
+    var url =
+      endpoint("upload") +
+      "?" +
+      encodeURIComponent(config.upload.filenameParam) +
+      "=" +
+      encodeURIComponent(filename);
 
-    return request(endpoint("upload"), {
+    var headers = { Accept: "application/json" };
+    if (config.upload.useFileContentType && file.type) {
+      headers["Content-Type"] = file.type;
+    }
+    var labelList = (labels || [])
+      .map(function (label) { return String(label).trim(); })
+      .filter(Boolean);
+    if (labelList.length) {
+      headers[config.upload.labelsHeader] = labelList.join(",");
+    }
+
+    return request(url, {
       method: config.upload.method,
-      body: form,
-      headers: { Accept: "application/json" } // let the browser set Content-Type + boundary
+      body: file, // raw image bytes
+      headers: headers
     }).then(function (res) {
       if (res.status === 204) return null;
       return res

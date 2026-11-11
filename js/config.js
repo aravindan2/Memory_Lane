@@ -1,22 +1,33 @@
 /**
- * Central configuration for the photo search & upload frontend.
+ * Central configuration for the Memory Lane photo frontend.
  *
- * Everything the app "assumes" about the backend lives here, so you can
- * re-wire it to the real API later without touching the UI code.
+ * Every assumption about the backend lives here, taken from the API Gateway
+ * spec committed at docs/swagger.json:
+ *
+ *   GET  https://<api-id>.execute-api.us-east-1.amazonaws.com/dev/search?q=...
+ *   PUT  https://<api-id>.execute-api.us-east-1.amazonaws.com/dev/photos?filename=...
+ *        headers: x-api-key            (gateway security)
+ *                 x-amz-meta-customLabels   (comma-separated custom labels)
+ *                 Content-Type         (the image's MIME type)
+ *        body:    raw image bytes
  *
  * Overrides (highest priority first):
- *   1. URL query parameter:   ?apiBase=http://localhost:8000
+ *   1. URL query parameters:  ?apiBase=http://localhost:5000&apiKey=abc123
  *   2. localStorage key "photoApp.config", e.g.
  *        localStorage.setItem("photoApp.config",
- *          JSON.stringify({ apiBase: "http://localhost:8000" }))
+ *          JSON.stringify({ apiBase: "http://localhost:5000", apiKey: "abc123" }))
  *   3. The defaults below.
  */
 (function () {
   "use strict";
 
   var DEFAULTS = {
-    // Where the backend lives (no trailing slash).
-    apiBase: "http://localhost:5000",
+    // API Gateway stage URL from docs/swagger.json (no trailing slash).
+    apiBase: "https://oi25a7sswf.execute-api.us-east-1.amazonaws.com/dev",
+
+    // Value for the x-api-key header (gateway security). Leave empty for a
+    // local backend without API-key auth. Never commit a real key.
+    apiKey: "",
 
     // Endpoint paths, relative to apiBase.
     endpoints: {
@@ -26,16 +37,20 @@
 
     // How to serialize a search request.
     // key = what the UI produces, value = query-param name sent on the wire.
+    // The gateway only documents ?q=, so label filtering happens client-side
+    // (see filterByLabels in js/app.js).
     searchParams: {
-      query: "q", // ?q=<text>
-      labels: "labels" // ?labels=a,b   (omit the param when empty)
+      query: "q"
     },
 
-    // How to serialize an upload request (multipart/form-data).
+    // How to serialize an upload request: raw bytes + filename query param +
+    // custom labels in a metadata header (matches the gateway + S3 metadata
+    // read by backend/index_photos/lambda_function.py).
     upload: {
-      fileField: "file", // FormData key for the binary
-      labelsField: "label", // FormData key repeated once per label
-      method: "PUT"
+      method: "PUT",
+      filenameParam: "filename", // ?filename=<original name>
+      labelsHeader: "x-amz-meta-customLabels", // comma-joined, omitted when empty
+      useFileContentType: true // send the file's MIME type as Content-Type
     },
 
     // Request timeout in milliseconds.
@@ -76,10 +91,10 @@
     console.warn("[config] ignoring invalid localStorage config:", err);
   }
 
-  // URL parameter override
+  // URL parameter overrides
   var params = new URLSearchParams(window.location.search);
   if (params.get("apiBase")) config.apiBase = params.get("apiBase");
-  if (params.get("apiBase")) config.apiBase = params.get("apiBase").replace(/\/+$/, "");
+  if (params.get("apiKey")) config.apiKey = params.get("apiKey");
 
   // Normalize: strip trailing slashes from apiBase
   config.apiBase = String(config.apiBase).replace(/\/+$/, "");

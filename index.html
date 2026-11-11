@@ -3,72 +3,132 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Photo Search &amp; Upload</title>
+  <title>Memory Lane — Photo Search &amp; Upload</title>
   <link rel="stylesheet" href="css/styles.css" />
 </head>
 <body>
-  <header class="site-header">
-    <div class="container header-inner">
-      <h1>📷 Photo Search &amp; Upload</h1>
-      <div class="api-indicator" id="api-indicator" title="Configured API base URL">
-        <span class="dot"></span>
-        <code id="api-base-label">…</code>
-      </div>
+  <!-- ============================== HEADER ============================== -->
+  <header class="app-header">
+    <span class="brand">Memory&nbsp;Lane</span>
+    <div class="api-indicator" id="api-indicator" title="Configured API base URL">
+      <span class="dot"></span>
+      <code id="api-base-label">…</code>
     </div>
   </header>
 
-  <main class="container">
-    <!-- ============================ SEARCH ============================ -->
-    <section class="card" aria-labelledby="search-heading">
-      <h2 id="search-heading">Search photos</h2>
-      <form id="search-form" class="search-form" autocomplete="off">
-        <div class="field grow">
-          <label for="search-query">Query</label>
-          <input
-            type="search"
-            id="search-query"
-            name="query"
-            placeholder="e.g. sunset, beach, cat…"
-          />
-        </div>
-        <div class="field grow">
-          <label for="search-labels">Labels <span class="muted">(comma-separated, optional)</span></label>
-          <input
-            type="text"
-            id="search-labels"
-            name="labels"
-            placeholder="e.g. vacation, 2024"
-          />
-        </div>
-        <div class="field field-actions">
-          <button type="submit" class="btn btn-primary" id="search-button">Search</button>
-          <button type="button" class="btn btn-ghost" id="search-clear" hidden>Clear</button>
-        </div>
-      </form>
-      <p class="status" id="search-status" role="status" aria-live="polite"></p>
-    </section>
+  <!-- ============================== RESULTS ============================= -->
+  <main class="stage">
+    <div class="results-meta">
+      <span class="muted" id="results-count"></span>
+      <button type="button" class="link-btn" id="search-clear" hidden>Clear</button>
+    </div>
 
-    <!-- ============================ RESULTS ============================ -->
-    <section aria-labelledby="results-heading">
-      <div class="results-header">
-        <h2 id="results-heading">Results</h2>
-        <span class="muted" id="results-count"></span>
+    <div id="results-grid" class="results-grid" aria-live="polite"></div>
+
+    <div class="empty-state" id="results-empty">
+      <p>Search for a photo to see it here, or clip <span aria-hidden="true">&#128206;</span> to upload one.</p>
+    </div>
+  </main>
+
+  <!-- ============================= LIGHTBOX ============================ -->
+  <div class="lightbox" id="lightbox" hidden>
+    <button type="button" class="lightbox-close" id="lightbox-close" aria-label="Close viewer">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+           stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
+        <path d="M18 6 6 18"></path>
+        <path d="m6 6 12 12"></path>
+      </svg>
+    </button>
+    <figure class="lightbox-figure">
+      <img id="lightbox-img" alt="" />
+      <p class="lightbox-fallback" id="lightbox-fallback">Preview unavailable.</p>
+      <figcaption class="lightbox-caption">
+        <p class="lightbox-title" id="lightbox-title"></p>
+        <ul class="chips" id="lightbox-chips"></ul>
+        <p class="photo-meta" id="lightbox-meta"></p>
+        <a class="lightbox-open" id="lightbox-open" href="#" target="_blank" rel="noopener">Open original ↗</a>
+      </figcaption>
+    </figure>
+  </div>
+
+  <!-- =============================== DOCK =============================== -->
+  <div class="dock">
+    <p class="status" id="search-status" role="status" aria-live="polite"></p>
+
+    <!-- optional label filter, revealed by the funnel button -->
+    <div class="labels-row" id="labels-row" hidden>
+      <input
+        type="text"
+        id="search-labels"
+        placeholder="Filter by labels — comma-separated, e.g. beach, 2024"
+        aria-label="Filter results by labels"
+      />
+    </div>
+
+    <form class="search-pill" id="search-form" autocomplete="off">
+      <input
+        type="search"
+        id="search-query"
+        name="query"
+        placeholder="Memory Lane search"
+        aria-label="Search photos"
+      />
+
+      <button
+        type="button"
+        class="icon-btn"
+        id="labels-toggle"
+        aria-label="Filter by labels"
+        aria-expanded="false"
+        title="Filter by labels"
+      >
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon>
+        </svg>
+      </button>
+
+      <button
+        type="button"
+        class="icon-btn"
+        id="upload-open"
+        aria-label="Upload a photo"
+        title="Upload a photo"
+      >
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
+        </svg>
+      </button>
+
+      <button type="submit" class="search-btn" id="search-button" aria-label="Search">
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
+             stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="11" cy="11" r="8"></circle>
+          <path d="m21 21-4.3-4.3"></path>
+        </svg>
+      </button>
+    </form>
+  </div>
+
+  <!-- ========================== UPLOAD MODAL =========================== -->
+  <div class="modal-backdrop" id="upload-modal" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="upload-heading">
+      <div class="modal-head">
+        <h2 id="upload-heading">Upload a photo</h2>
+        <button type="button" class="icon-btn dark" id="upload-close" aria-label="Close">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+               stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
+            <path d="M18 6 6 18"></path>
+            <path d="m6 6 12 12"></path>
+          </svg>
+        </button>
       </div>
 
-      <div id="results-grid" class="results-grid" aria-live="polite"></div>
-
-      <div class="empty-state" id="results-empty">
-        <p>Run a search to see photos here.</p>
-      </div>
-    </section>
-
-    <!-- ============================ UPLOAD ============================ -->
-    <section class="card" aria-labelledby="upload-heading">
-      <h2 id="upload-heading">Upload a photo</h2>
       <form id="upload-form" class="upload-form" autocomplete="off">
         <div class="field">
           <label for="upload-file">Photo file</label>
-          <input type="file" id="upload-file" name="file" accept="image/*" required />
+          <input type="file" id="upload-file" name="file" accept="image/*" />
           <div class="file-preview" id="file-preview" hidden>
             <img id="file-preview-img" alt="Selected file preview" />
             <span id="file-preview-name" class="muted"></span>
@@ -81,7 +141,7 @@
             <input
               type="text"
               id="label-input"
-              placeholder="Type a label and press Enter"
+              placeholder="Type a label, press Enter"
               list="label-suggestions"
             />
             <button type="button" class="btn" id="label-add">Add</button>
@@ -91,21 +151,19 @@
           <p class="hint muted">Labels are sent as repeated <code>label</code> fields on the PUT request.</p>
         </div>
 
-        <div class="field field-actions">
-          <button type="submit" class="btn btn-primary" id="upload-button">Upload</button>
+        <div class="modal-actions">
+          <button type="submit" class="btn btn-light" id="upload-button">Upload</button>
           <button type="reset" class="btn btn-ghost" id="upload-reset">Reset</button>
         </div>
       </form>
-      <p class="status" id="upload-status" role="status" aria-live="polite"></p>
-    </section>
-  </main>
 
-  <footer class="site-footer">
-    <div class="container muted">
-      API base, endpoint paths and field names are configured in
-      <code>js/config.js</code> (overridable via <code>?apiBase=</code> or
-      <code>localStorage["photoApp.config"]</code>).
+      <p class="status" id="upload-status" role="status" aria-live="polite"></p>
     </div>
+  </div>
+
+  <footer class="app-footer muted">
+    API base, endpoints and field names are configured in <code>js/config.js</code>
+    (override with <code>?apiBase=</code> or <code>localStorage["photoApp.config"]</code>).
   </footer>
 
   <script src="js/config.js"></script>
