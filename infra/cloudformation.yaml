@@ -1,0 +1,225 @@
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Memory Lane Assignment 3 - isolated CloudFormation demo
+
+Resources:
+
+  # ---------------------------------------
+  # B1: Public frontend website bucket
+  # ---------------------------------------
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      WebsiteConfiguration:
+        IndexDocument: index.html
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: false
+        RestrictPublicBuckets: false
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: s3:GetObject
+            Resource: !Sub '${FrontendBucket.Arn}/*'
+
+  # ---------------------------------------
+  # B2: Private photo storage bucket
+  # ---------------------------------------
+  PhotosBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+
+  # ---------------------------------------
+  # Lambda execution role
+  # ---------------------------------------
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+      Policies:
+        - PolicyName: DemoPhotoPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub '${PhotosBucket.Arn}/*'
+
+              - Effect: Allow
+                Action: rekognition:DetectLabels
+                Resource: '*'
+
+  # ---------------------------------------
+  # LF1: Index photos placeholder
+  # ---------------------------------------
+  IndexPhotosFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import json
+
+          def handler(event, context):
+              print("CloudFormation LF1 version 1")
+
+              return {
+                  "statusCode": 200,
+                  "body": json.dumps({
+                      "message": "LF1 demo is working"
+                  })
+              }
+
+  # ---------------------------------------
+  # LF2: Search photos placeholder
+  # ---------------------------------------
+  SearchPhotosFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import json
+
+          def handler(event, context):
+              return {
+                  "statusCode": 200,
+                  "headers": {
+                      "Content-Type": "application/json"
+                  },
+                  "body": json.dumps({
+                      "results": [],
+                      "demo": "v2"
+                  })
+              }
+
+  # ---------------------------------------
+  # API Gateway REST API
+  # ---------------------------------------
+  DemoApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub '${AWS::StackName}-api'
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  PhotosResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref DemoApi
+      ParentId: !GetAtt DemoApi.RootResourceId
+      PathPart: photos
+
+  SearchResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref DemoApi
+      ParentId: !GetAtt DemoApi.RootResourceId
+      PathPart: search
+
+  # Demo-only PUT endpoint.
+  # This does NOT upload photos to S3.
+  PutPhotosMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DemoApi
+      ResourceId: !Ref PhotosResource
+      HttpMethod: PUT
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode":200}'
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseTemplates:
+              application/json: '{"message":"Demo only"}'
+      MethodResponses:
+        - StatusCode: '200'
+
+  # GET endpoint invokes demo LF2.
+  GetSearchMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DemoApi
+      ResourceId: !Ref SearchResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub
+          - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+          - FunctionArn: !GetAtt SearchPhotosFunction.Arn
+
+  SearchLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref SearchPhotosFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${DemoApi}/*/GET/search'
+
+  DemoDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - PutPhotosMethod
+      - GetSearchMethod
+    Properties:
+      RestApiId: !Ref DemoApi
+      StageName: demo
+
+# ---------------------------------------
+# Stack outputs
+# ---------------------------------------
+Outputs:
+
+  FrontendBucketName:
+    Value: !Ref FrontendBucket
+
+  PhotosBucketName:
+    Value: !Ref PhotosBucket
+
+  FrontendWebsiteURL:
+    Description: Public frontend website URL
+    Value: !GetAtt FrontendBucket.WebsiteURL
+
+  IndexLambdaName:
+    Value: !Ref IndexPhotosFunction
+
+  SearchLambdaName:
+    Value: !Ref SearchPhotosFunction
+
+  ApiBaseURL:
+    Description: CloudFormation demonstration API URL
+    Value: !Sub 'https://${DemoApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/demo'
