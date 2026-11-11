@@ -27,7 +27,7 @@
 
     // Value for the x-api-key header (gateway security). Leave empty for a
     // local backend without API-key auth. Never commit a real key.
-    apiKey: "",
+    apiKey: "nqxSV1Twvp46z1dbPsUha5o0hKnej0xT8O6hItW1",
 
     // Endpoint paths, relative to apiBase.
     endpoints: {
