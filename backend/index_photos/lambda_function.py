@@ -80,3 +80,5 @@ def lambda_handler(event, context):
         "processed": len(documents),
         "documents": documents
     }
+
+# Testing automatic GitHub CI/CD trigger
