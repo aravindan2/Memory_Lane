@@ -1,0 +1,18 @@
+version: 0.2
+
+phases:
+  build:
+    commands:
+      - echo "Preparing Memory Lane frontend"
+      - test -f index.html
+      - test -f css/styles.css
+      - test -f js/config.js
+      - test -f js/api.js
+      - test -f js/app.js
+
+artifacts:
+  files:
+    - index.html
+    - 'css/**/*'
+    - 'js/**/*'
+  discard-paths: no
