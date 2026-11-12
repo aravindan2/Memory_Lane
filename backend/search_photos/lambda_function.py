@@ -1,13 +1,13 @@
-"""Memory Lane LF2 - API Gateway GET /search -> Lex V2 -> OpenSearch -> S3 URLs.
 
-Uses the contract in MEMORY_LANE_TEAM_HANDOFF.md. No OpenSearch/third-party
-client dependency: AWS Lambda's built-in boto3 + botocore and Python stdlib.
-"""
+"""Memory Lane LF2: Lex, OpenSearch, and S3 photo search."""
 
 import json
 import logging
 import os
+import re
 import uuid
+
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import boto3
@@ -15,21 +15,36 @@ from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
 from botocore.config import Config
 
-LOG = logging.getLogger(__name__)
-LOG.setLevel(logging.INFO)
+
+LOGGER = logging.getLogger(__name__)
+LOGGER.setLevel(logging.INFO)
+
 REGION = os.environ.get("AWS_REGION", "us-east-1")
 SEARCH_PAGE_SIZE = 100
-# OpenSearch's usual default maximum result window. For larger data sets,
-# switch to search_after/pagination instead of silently omitting results.
 MAX_SEARCH_WINDOW = 10000
 
 
-def _response(status, body):
+# Supported natural-language prefixes.
+_SEARCH_PREFIX = re.compile(
+    r"^(?:please\s+)?(?:"
+    r"(?:show\s+me|find(?:\s+me)?|search\s+for)"
+    r"(?:\s+(?:all\s+)?(?:photos?|pictures?|images?))?"
+    r"(?:\s+(?:of|with|containing|tagged\s+with))?"
+    r"|(?:all\s+)?(?:photos?|pictures?|images?)"
+    r"\s+(?:of|with|containing)"
+    r")\s+",
+    re.IGNORECASE,
+)
+
+
+def _response(status_code, body):
     return {
-        "statusCode": status,
+        "statusCode": status_code,
         "headers": {
             "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": os.environ.get("CORS_ALLOW_ORIGIN", "*"),
+            "Access-Control-Allow-Origin": os.environ.get(
+                "CORS_ALLOW_ORIGIN", "*"
+            ),
             "Access-Control-Allow-Headers": "Content-Type,x-api-key",
             "Access-Control-Allow-Methods": "GET,OPTIONS",
         },
@@ -38,151 +53,419 @@ def _response(status, body):
 
 
 def extract_keywords(lex_response):
-    """Parse the agreed Lex V2 SearchIntent scalar slots, no keyword guessing."""
-    state = lex_response.get("sessionState") or {}
-    intent = state.get("intent") or {}
+    """Extract KeywordOne and KeywordTwo from Lex."""
+    intent = (
+        (lex_response.get("sessionState") or {})
+        .get("intent") or {}
+    )
+
     if intent.get("name") != "SearchIntent":
         return []
-    if intent.get("state") == "Failed" or intent.get("confirmationState") == "Denied":
+
+    if (
+        intent.get("state") == "Failed"
+        or intent.get("confirmationState") == "Denied"
+    ):
         return []
 
     slots = intent.get("slots") or {}
-    output, seen = [], set()
-    for name in ("KeywordOne", "KeywordTwo"):
-        slot = slots.get(name)
+    keywords = []
+    seen = set()
+
+    for slot_name in ("KeywordOne", "KeywordTwo"):
+        slot = slots.get(slot_name)
+
         if not isinstance(slot, dict):
             continue
+
         value = slot.get("value") or {}
-        raw = value.get("interpretedValue") or value.get("originalValue")
-        if not isinstance(raw, str):
+        term = (
+            value.get("interpretedValue")
+            or value.get("originalValue")
+        )
+
+        if not isinstance(term, str):
             continue
-        keyword = raw.strip()
-        if keyword and keyword.casefold() not in seen:
-            output.append(keyword)
-            seen.add(keyword.casefold())
-    return output
+
+        term = term.strip()
+
+        if term and term.casefold() not in seen:
+            seen.add(term.casefold())
+            keywords.append(term)
+
+    return keywords
+
+
+def parse_explicit_keywords(query):
+    """Recover labels from straightforward search phrases.
+
+    Examples:
+        tierlist -> ["tierlist"]
+        person and tierlist -> ["person", "tierlist"]
+        show me photos of tierlist -> ["tierlist"]
+        show me cats and dogs -> ["cats", "dogs"]
+    """
+    if not isinstance(query, str):
+        return []
+
+    text = query.strip().strip(" .!?\"'")
+
+    if not text or len(text) > 160:
+        return []
+
+    prefix = _SEARCH_PREFIX.match(text)
+
+    if prefix:
+        text = text[prefix.end():].strip()
+
+    elif re.match(
+        r"^(?:who|what|when|where|why|how)\b",
+        text,
+        re.IGNORECASE,
+    ):
+        return []
+
+    terms = re.split(
+        r"\s+and\s+",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    if len(terms) > 2:
+        return []
+
+    keywords = []
+
+    for term in terms:
+        term = term.strip().strip(" .!?\"'")
+
+        if (
+            not term
+            or len(term) > 80
+            or any(c in term for c in "\r\n\t")
+        ):
+            return []
+
+        if len(term.split()) > 5:
+            return []
+
+        if term.casefold() not in [
+            existing.casefold()
+            for existing in keywords
+        ]:
+            keywords.append(term)
+
+    return keywords
+
+
+def resolve_keywords(query, lex_keywords):
+    """Use Lex, repairing missing slots when necessary."""
+    explicit = parse_explicit_keywords(query)
+
+    # Lex may extract just "person" from
+    # "person and tierlist".
+    if len(explicit) == 2 and len(lex_keywords) < 2:
+        return explicit
+
+    # Lex may return no slots for an unfamiliar custom label.
+    if not lex_keywords:
+        return explicit
+
+    return lex_keywords
 
 
 def _recognize_keywords(query):
-    lex = boto3.client("lexv2-runtime", region_name=REGION)
-    lex_response = lex.recognize_text(
+    """Interpret the search through Amazon Lex V2."""
+    lex = boto3.client(
+        "lexv2-runtime",
+        region_name=REGION,
+    )
+
+    response = lex.recognize_text(
         botId=os.environ["LEX_BOT_ID"],
         botAliasId=os.environ["LEX_BOT_ALIAS_ID"],
-        localeId=os.environ.get("LEX_LOCALE_ID", "en_US"),
+        localeId=os.environ.get(
+            "LEX_LOCALE_ID", "en_US"
+        ),
         sessionId=uuid.uuid4().hex,
         text=query,
     )
-    return extract_keywords(lex_response)
+
+    return extract_keywords(response)
 
 
 def build_search_query(keywords, offset=0):
-    """Match ALL Lex-extracted terms against the labels text field."""
+    """Match ALL requested labels using AND semantics."""
     return {
         "query": {
             "bool": {
                 "must": [
-                    {"match": {"labels": {"query": term, "operator": "and"}}}
-                    for term in keywords
+                    {
+                        "match": {
+                            "labels": {
+                                "query": keyword,
+                                "operator": "and",
+                            }
+                        }
+                    }
+                    for keyword in keywords
                 ]
             }
         },
         "from": offset,
         "size": SEARCH_PAGE_SIZE,
-        "sort": [{"bucket": "asc"}, {"objectKey": "asc"}],
+        "sort": [
+            {"bucket": "asc"},
+            {"objectKey": "asc"},
+        ],
     }
 
 
 def _signed_opensearch_post(payload):
-    """Send a SigV4-signed OpenSearch data-plane POST (service name 'es')."""
-    endpoint = os.environ["OPENSEARCH_ENDPOINT"].rstrip("/")
-    index = os.environ.get("OPENSEARCH_INDEX", "photos")
+    """Send an AWS SigV4-signed request to OpenSearch."""
+    endpoint = os.environ[
+        "OPENSEARCH_ENDPOINT"
+    ].rstrip("/")
+
+    index = os.environ.get(
+        "OPENSEARCH_INDEX", "photos"
+    )
+
     url = f"{endpoint}/{index}/_search"
-    data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+    body = json.dumps(
+        payload,
+        separators=(",", ":"),
+    ).encode("utf-8")
 
     session = boto3.Session(region_name=REGION)
     credentials = session.get_credentials()
-    if credentials is None:
-        raise RuntimeError("AWS credentials unavailable to LF2")
-    credentials = credentials.get_frozen_credentials()
 
-    signed_request = AWSRequest(
-        method="POST", url=url, data=data,
-        headers={"Content-Type": "application/json"},
-    )
-    SigV4Auth(credentials, "es", REGION).add_auth(signed_request)
-    request = Request(
+    if credentials is None:
+        raise RuntimeError(
+            "LF2 has no AWS role credentials"
+        )
+
+    signed = AWSRequest(
+        method="POST",
         url=url,
-        data=data,
-        headers=dict(signed_request.headers.items()),
+        data=body,
+        headers={
+            "Content-Type": "application/json"
+        },
+    )
+
+    SigV4Auth(
+        credentials.get_frozen_credentials(),
+        "es",
+        REGION,
+    ).add_auth(signed)
+
+    request = Request(
+        url,
+        data=body,
+        headers=dict(signed.headers.items()),
         method="POST",
     )
-    with urlopen(request, timeout=8) as response:
-        return json.loads(response.read().decode("utf-8"))
+
+    try:
+        with urlopen(request, timeout=8) as response:
+            return json.loads(
+                response.read().decode("utf-8")
+            )
+
+    except HTTPError as error:
+        detail = error.read().decode(
+            "utf-8",
+            errors="replace",
+        )
+
+        LOGGER.error(
+            "OpenSearch search HTTP %s: %s",
+            error.code,
+            detail[:2000],
+        )
+
+        raise
 
 
 def _query_opensearch(keywords):
-    """Read all hits up to the managed index's default 10k result window."""
+    """Fetch matching photos, handling multiple pages."""
     hits = []
     offset = 0
+
     while True:
-        response = _signed_opensearch_post(build_search_query(keywords, offset))
-        data = response["hits"]
-        page = data.get("hits", [])
+        payload = build_search_query(
+            keywords,
+            offset,
+        )
+
+        response = _signed_opensearch_post(payload)
+
+        page = (
+            (response.get("hits") or {})
+            .get("hits", [])
+        )
+
         hits.extend(page)
-        total = data.get("total", 0)
-        total_count = total.get("value", 0) if isinstance(total, dict) else total
         offset += len(page)
-        if not page or offset >= total_count:
-            break
+
+        if len(page) < SEARCH_PAGE_SIZE:
+            return hits
+
         if offset >= MAX_SEARCH_WINDOW:
-            raise RuntimeError("More search results than the default OpenSearch window")
-    return hits
+            raise RuntimeError(
+                "Search results exceed "
+                "OpenSearch's result window"
+            )
 
 
 def _presign_photo(bucket, key):
-    s3 = boto3.client("s3", region_name=REGION,
-                      config=Config(signature_version="s3v4"))
-    ttl = max(60, min(3600, int(os.environ.get("S3_PRESIGN_TTL_SECONDS", "900"))))
+    """Generate a temporary URL for a private S3 photo."""
+    ttl = max(
+        60,
+        min(
+            3600,
+            int(
+                os.environ.get(
+                    "S3_PRESIGN_TTL_SECONDS",
+                    "900",
+                )
+            ),
+        ),
+    )
+
+    s3 = boto3.client(
+        "s3",
+        region_name=REGION,
+        config=Config(
+            signature_version="s3v4"
+        ),
+    )
+
     return s3.generate_presigned_url(
-        "get_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=ttl
+        "get_object",
+        Params={
+            "Bucket": bucket,
+            "Key": key,
+        },
+        ExpiresIn=ttl,
     )
 
 
 def lambda_handler(event, context):
-    params = event.get("queryStringParameters") or {}
-    q = params.get("q") or ""
-    if not isinstance(q, str) or not q.strip():
-        return _response(200, {"results": []})
-    q = q.strip()
-    if len(q) > 1024:
-        return _response(400, {"code": 400, "message": "Query is too long"})
+    """API Gateway GET /search handler."""
+    params = (
+        event.get("queryStringParameters") or {}
+    )
 
-    required = ("LEX_BOT_ID", "LEX_BOT_ALIAS_ID", "OPENSEARCH_ENDPOINT", "PHOTOS_BUCKET")
-    if any(not os.environ.get(name) for name in required):
-        return _response(503, {"code": 503, "message": "Search service not configured"})
+    query = params.get("q") or ""
+
+    if not isinstance(query, str) or not query.strip():
+        return _response(200, {"results": []})
+
+    query = query.strip()
+
+    if len(query) > 1024:
+        return _response(
+            400,
+            {
+                "code": 400,
+                "message": "Query is too long",
+            },
+        )
+
+    required = (
+        "LEX_BOT_ID",
+        "LEX_BOT_ALIAS_ID",
+        "OPENSEARCH_ENDPOINT",
+        "PHOTOS_BUCKET",
+    )
+
+    if any(
+        not os.environ.get(name)
+        for name in required
+    ):
+        return _response(
+            503,
+            {
+                "code": 503,
+                "message": "Search service not configured",
+            },
+        )
 
     try:
-        keywords = _recognize_keywords(q)
-        if not keywords:
-            return _response(200, {"results": []})
+        # Always call Lex first.
+        lex_keywords = _recognize_keywords(query)
 
-        seen, results = set(), []
-        for hit in _query_opensearch(keywords):
+        # Repair missing Lex slots for explicit label queries.
+        keywords = resolve_keywords(
+            query,
+            lex_keywords,
+        )
+
+        LOGGER.info(
+            "Search keywords: %s",
+            keywords,
+        )
+
+        if not keywords:
+            return _response(
+                200,
+                {"results": []},
+            )
+
+        hits = _query_opensearch(keywords)
+
+        results = []
+        seen = set()
+
+        for hit in hits:
             source = hit.get("_source") or {}
+
             bucket = source.get("bucket")
             key = source.get("objectKey")
             labels = source.get("labels")
-            if (bucket != os.environ["PHOTOS_BUCKET"] or not isinstance(key, str)
-                    or not key or not isinstance(labels, list)
-                    or not all(isinstance(label, str) for label in labels)):
+
+            if (
+                bucket != os.environ["PHOTOS_BUCKET"]
+                or not isinstance(key, str)
+                or not key
+                or not isinstance(labels, list)
+                or not all(
+                    isinstance(label, str)
+                    for label in labels
+                )
+            ):
                 continue
-            ident = (bucket, key)
-            if ident in seen:
+
+            identity = (bucket, key)
+
+            if identity in seen:
                 continue
-            seen.add(ident)
-            results.append({"url": _presign_photo(bucket, key), "labels": labels})
-        return _response(200, {"results": results})
+
+            seen.add(identity)
+
+            results.append({
+                "url": _presign_photo(
+                    bucket,
+                    key,
+                ),
+                "labels": labels,
+            })
+
+        return _response(
+            200,
+            {"results": results},
+        )
+
     except Exception:
-        # Never expose upstream AWS or domain error details to the browser.
-        LOG.exception("LF2 search failed")
-        return _response(502, {"code": 502, "message": "Search temporarily unavailable"})
+        LOGGER.exception("LF2 search failed")
+
+        return _response(
+            502,
+            {
+                "code": 502,
+                "message": "Search temporarily unavailable",
+            },
+        )
