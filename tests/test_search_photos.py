@@ -34,12 +34,39 @@ class SearchPhotosTests(unittest.TestCase):
             "name": "FallbackIntent", "slots": {"KeywordOne": {"value": {"interpretedValue": "dogs"}}}
         }}}), [])
 
-    def test_two_keywords_use_and_matching(self):
+    def test_two_keywords_use_or_matching(self):
         query = lf2.build_search_query(["cats", "dogs"])
-        self.assertEqual(query["query"]["bool"]["must"], [
+        self.assertEqual(query["query"]["bool"]["should"], [
             {"match": {"labels": {"query": "cats", "operator": "and"}}},
             {"match": {"labels": {"query": "dogs", "operator": "and"}}},
         ])
+        self.assertEqual(query["query"]["bool"]["minimum_should_match"], 1)
+        self.assertNotIn("must", query["query"]["bool"])
+
+    def test_single_keyword_uses_same_or_query(self):
+        query = lf2.build_search_query(["tierlist"])
+        self.assertEqual(len(query["query"]["bool"]["should"]), 1)
+        self.assertEqual(query["query"]["bool"]["minimum_should_match"], 1)
+
+    def test_explicit_and_or_keywords(self):
+        cases = {
+            "tierlist": ["tierlist"],
+            "tierlist and fran": ["tierlist", "fran"],
+            "tierlist or fran": ["tierlist", "fran"],
+            "person AND tierlist": ["person", "tierlist"],
+            "show me photos of dogs and cats": ["dogs", "cats"],
+            "show me photos of dogs or cats": ["dogs", "cats"],
+            "show me photos of tierlist": ["tierlist"],
+        }
+        for query, expected in cases.items():
+            with self.subTest(query=query):
+                self.assertEqual(lf2.parse_explicit_keywords(query), expected)
+
+    def test_explicit_two_keywords_override_incomplete_lex(self):
+        self.assertEqual(lf2.resolve_keywords("tierlist or fran", ["fran"]), ["tierlist", "fran"])
+        self.assertEqual(lf2.resolve_keywords("dogs and cats", ["dogs"]), ["dogs", "cats"])
+        self.assertEqual(lf2.resolve_keywords("tierlist and fran", []), ["tierlist", "fran"])
+        self.assertEqual(lf2.resolve_keywords("tierlist", []), ["tierlist"])
 
     def test_missing_configuration_is_explicit(self):
         with patch.dict(os.environ, {}, clear=True):
